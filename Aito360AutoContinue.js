@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         360视觉云 - 显式控制面板 (V6.0全功能版)
+// @name         360视觉云 - 显式控制面板 (V7.0 终极版)
 // @namespace    http://tampermonkey.net/
-// @version      6.0
-// @description  监控"继续播放"弹窗并自动点击，同时提供隐藏云台控制器功能，解决画面遮挡问题。
+// @version      7.0
+// @description  自动点击"继续播放"弹窗，并提供一键隐藏/显示页面遮挡元素（云台、底部控制栏）的功能。
 // @author       Assistant
 // @match        *://*.360.cn/*
 // @match        *://*.360.com/*
@@ -18,6 +18,9 @@
     const PANEL_ID = "my-360-control-panel";
     const CLICK_COOLDOWN = 10000;
     let lastClickTime = 0;
+    
+    // 标记当前遮挡物是显示还是隐藏 (false=显示中, true=已隐藏)
+    let isHiddenMode = false;
 
     // === UI 样式 ===
     const css = `
@@ -83,17 +86,21 @@
         #${PANEL_ID}.minimized .panel-content {
             display: none;
         }
-        /* 新增：功能按钮样式 */
+        /* 功能按钮样式 */
         .action-btn {
             background-color: #e67e22;
             color: white;
             border: none;
-            padding: 6px 10px;
+            padding: 8px 10px;
             border-radius: 4px;
             cursor: pointer;
             font-weight: bold;
             transition: background 0.2s;
             text-align: center;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
         }
         .action-btn:hover {
             background-color: #d35400;
@@ -132,7 +139,7 @@
         panel.id = PANEL_ID;
         panel.innerHTML = `
             <div class="panel-header">
-                <span class="header-text">360监控助手 V6</span>
+                <span class="header-text">360监控助手 V7</span>
                 <span class="toggle-btn">➖</span>
             </div>
             <div class="panel-content">
@@ -140,7 +147,9 @@
                 <div>状态: <span id="${PANEL_ID}-status" class="status-running">扫描中...</span></div>
                 
                 <!-- 功能区 -->
-                <button id="${PANEL_ID}-toggle-cam" class="action-btn">👁️ 隐藏云台控制器</button>
+                <button id="${PANEL_ID}-toggle-all" class="action-btn">
+                    <span>👁️</span> 显示/隐藏控制面板
+                </button>
 
                 <!-- 日志区 -->
                 <div class="log-box" id="${PANEL_ID}-log"></div>
@@ -154,45 +163,65 @@
         };
 
         // 绑定显隐按钮事件
-        document.getElementById(`${PANEL_ID}-toggle-cam`).onclick = toggleController;
+        document.getElementById(`${PANEL_ID}-toggle-all`).onclick = togglePageControls;
     }
 
-    // === 功能：显隐云台控制器 (健壮版) ===
-    function toggleController() {
-        const btn = document.getElementById(`${PANEL_ID}-toggle-cam`);
-        
-        // 健壮性选择器：
-        // 1. 优先找 .rotatebox
-        // 2. 验证它内部是否包含 .rotate 或 .sector，确保不是页面上其他同名元素
-        let target = null;
-        const boxes = document.querySelectorAll('.rotatebox');
-        
-        for (let box of boxes) {
-            // 检查子元素特征，确保这是我们要找的那个云台
+    // === 功能：一键显隐所有遮挡控件 (健壮版) ===
+    function togglePageControls() {
+        const btn = document.getElementById(`${PANEL_ID}-toggle-all`);
+        const targets = []; // 存放所有要操作的元素
+
+        // --- 1. 寻找云台控制器 (.rotatebox) ---
+        const rotateBoxes = document.querySelectorAll('.rotatebox');
+        for (let box of rotateBoxes) {
+            // 健壮性校验：必须包含 .rotate 或 .sector 才是真的云台
             if (box.querySelector('.rotate') || box.querySelector('.sector')) {
-                target = box;
-                break;
+                targets.push(box);
             }
         }
 
-        if (!target) {
-            log("未检测到云台，请先选择摄像头", "#f39c12");
+        // --- 2. 寻找底部操作栏 (.controlsBot) ---
+        // 使用属性包含匹配，防止 ID 变化 (data-v 忽略，id 忽略)
+        const potentialBars = document.querySelectorAll('div[class*="controlsBot"]');
+        for (let bar of potentialBars) {
+            // 健壮性校验：检查内部特征，确保不误伤
+            // 只要包含以下任意一个特征，就认为是底部栏
+            const hasVideoText = bar.innerText && bar.innerText.includes("查看卡录像");
+            const hasVolume = bar.querySelector('.volumeItem');
+            const hasClarity = bar.querySelector('.Clarityselect');
+            
+            if (hasVideoText || hasVolume || hasClarity) {
+                targets.push(bar);
+            }
+        }
+
+        // --- 3. 执行切换 ---
+        if (targets.length === 0) {
+            log("未检测到任何遮挡控件", "#f39c12");
+            log("请先选择并在播放摄像头画面", "#7f8c8d");
             return;
         }
 
-        // 切换显示状态
-        if (target.style.display === 'none') {
-            // 当前是隐藏的，改为显示
-            target.style.display = ''; 
-            btn.innerText = "👁️ 隐藏云台控制器";
-            btn.classList.remove('hidden-mode');
-            log("已恢复显示云台", "#3498db");
-        } else {
-            // 当前是显示的，改为隐藏
-            target.style.display = 'none';
-            btn.innerText = "🙈 显示云台控制器";
+        // 切换状态
+        isHiddenMode = !isHiddenMode;
+
+        targets.forEach(el => {
+            if (isHiddenMode) {
+                el.style.display = 'none'; // 隐藏
+            } else {
+                el.style.display = ''; // 恢复默认
+            }
+        });
+
+        // 更新按钮外观
+        if (isHiddenMode) {
             btn.classList.add('hidden-mode');
-            log("已隐藏云台遮挡", "#9b59b6");
+            btn.querySelector('span').innerText = "🙈";
+            log(`已隐藏 ${targets.length} 个页面控件`, "#9b59b6");
+        } else {
+            btn.classList.remove('hidden-mode');
+            btn.querySelector('span').innerText = "👁️";
+            log("已恢复显示页面控件", "#3498db");
         }
     }
 
@@ -250,7 +279,7 @@
     // === 启动 ===
     setTimeout(() => {
         createPanel();
-        log("脚本 V6 已加载 (含云台控制)");
+        log("脚本 V7 已加载 (全控模式)");
         setInterval(checkAndClick, 2000);
     }, 1500);
 
