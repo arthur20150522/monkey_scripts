@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         360视觉云 - 显式控制面板 (V9.0 源码适配版)
+// @name         360视觉云 - 显式控制面板 (V10.0 隐形打击版)
 // @namespace    http://tampermonkey.net/
-// @version      9.0
-// @description  自动点击"继续播放"弹窗，并提供一键隐藏/显示页面遮挡元素（云台、底部控制栏）的功能。基于HTML源码分析优化：精准锁定ElementUI按钮，强力阻止事件冒泡，彻底解决误触云台问题。
+// @version      10.0
+// @description  基于HTML源码深度优化：在自动点击前后强力压制云台弹出，确保"继续播放"时不干扰画面。
 // @author       Assistant
 // @match        *://*.360.cn/*
 // @match        *://*.360.com/*
@@ -16,11 +16,13 @@
     // === 配置 ===
     const BUTTON_KEYWORDS = ["继续播放", "继续观看", "恢复播放"];
     const PANEL_ID = "my-360-control-panel";
-    const CLICK_COOLDOWN = 5000; // 冷却时间5秒
+    const CLICK_COOLDOWN = 5000;
     let lastClickTime = 0;
-    let isHiddenMode = false; // 记录遮挡物是否被隐藏
+    
+    // 全局状态：用户是否主动开启了“隐藏面板”模式
+    let isUserHiddenMode = false; 
 
-    // === UI 样式 (层级调至 HTML 中观测到的最高值之上) ===
+    // === UI 样式 ===
     const css = `
         #${PANEL_ID} {
             position: fixed;
@@ -29,7 +31,7 @@
             width: 230px;
             background: #2c3e50;
             color: #ecf0f1;
-            z-index: 2147483647 !important; /* 确保最高层级 */
+            z-index: 2147483647 !important;
             border-radius: 6px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.7);
             font-family: "Microsoft YaHei", sans-serif;
@@ -116,9 +118,6 @@
             font-size: 11px;
             line-height: 1.5;
         }
-        /* 滚动条美化 */
-        .log-box::-webkit-scrollbar { width: 4px; }
-        .log-box::-webkit-scrollbar-thumb { background: #555; border-radius: 2px; }
         .status-running { color: #2ecc71; font-weight: bold; }
         .status-cooldown { color: #f39c12; font-weight: bold; }
     `;
@@ -139,7 +138,7 @@
         panel.id = PANEL_ID;
         panel.innerHTML = `
             <div class="panel-header">
-                <span class="header-text">360监控助手 V9</span>
+                <span class="header-text">360监控助手 V10</span>
                 <span class="toggle-btn">➖</span>
             </div>
             <div class="panel-content">
@@ -156,47 +155,122 @@
         panel.querySelector('.panel-header').onclick = () => {
             panel.classList.toggle('minimized');
         };
-        document.getElementById(`${PANEL_ID}-toggle-all`).onclick = togglePageControls;
+        document.getElementById(`${PANEL_ID}-toggle-all`).onclick = toggleUserHiddenMode;
     }
 
-    // === 功能：一键显隐页面控件 (基于源码特征) ===
-    function togglePageControls() {
-        const btn = document.getElementById(`${PANEL_ID}-toggle-all`);
+    // === 核心工具：获取所有干扰元素 ===
+    function getDisturbingElements() {
         const targets = [];
-
-        // 1. 寻找云台 (.rotatebox)
+        // 1. 云台 (.rotatebox)
         document.querySelectorAll('.rotatebox').forEach(box => {
-            // 源码特征：包含 rotate 类
             if (box.querySelector('.rotate')) targets.push(box);
         });
-
-        // 2. 寻找底部栏 (controlsBot)
-        // 源码特征：class包含 controlsBot 且内部有音量或全屏按钮
+        // 2. 底部栏 (controlsBot)
         document.querySelectorAll('div[class*="controlsBot"]').forEach(bar => {
             targets.push(bar);
         });
+        return targets;
+    }
+
+    // === 功能：用户手动切换显隐 ===
+    function toggleUserHiddenMode() {
+        const btn = document.getElementById(`${PANEL_ID}-toggle-all`);
+        const targets = getDisturbingElements();
 
         if (targets.length === 0) {
-            log("未找到遮挡控件 (可能未加载)", "#f39c12");
+            log("未找到控件 (可能未加载)", "#f39c12");
             return;
         }
 
-        isHiddenMode = !isHiddenMode;
+        isUserHiddenMode = !isUserHiddenMode; // 切换状态
         
-        targets.forEach(el => {
-            // 使用 visibility 而不是 display，防止页面排版错乱（可选）
-            // 这里仍用 display: none 比较彻底
-            el.style.display = isHiddenMode ? 'none' : '';
-        });
+        applyVisibility(isUserHiddenMode); // 应用状态
 
-        if (isHiddenMode) {
+        if (isUserHiddenMode) {
             btn.classList.add('hidden-mode');
             btn.querySelector('span').innerText = "🙈";
-            log(`已隐藏 ${targets.length} 个控件`, "#9b59b6");
+            log(`已手动隐藏控件`, "#9b59b6");
         } else {
             btn.classList.remove('hidden-mode');
             btn.querySelector('span').innerText = "👁️";
-            log("已恢复页面控件", "#3498db");
+            log("已手动显示控件", "#3498db");
+        }
+    }
+
+    // === 辅助：应用显隐状态 ===
+    function applyVisibility(shouldHide) {
+        const targets = getDisturbingElements();
+        targets.forEach(el => {
+            el.style.display = shouldHide ? 'none' : '';
+        });
+    }
+
+    // === 核心逻辑：隐形打击 ===
+    function checkAndClick() {
+        if (!document.getElementById(PANEL_ID)) createPanel();
+        if (Date.now() - lastClickTime < CLICK_COOLDOWN) return;
+
+        // 状态复位
+        const statusSpan = document.getElementById(`${PANEL_ID}-status`);
+        if (statusSpan && statusSpan.innerText !== "扫描中...") {
+            statusSpan.innerText = "扫描中...";
+            statusSpan.className = "status-running";
+        }
+
+        // 查找“继续播放”
+        const elements = document.querySelectorAll('span, button');
+        
+        for (let i = 0; i < elements.length; i++) {
+            let el = elements[i];
+            if (el.offsetParent === null) continue;
+            
+            const text = el.innerText ? el.innerText.trim() : "";
+            if (!BUTTON_KEYWORDS.includes(text)) continue;
+
+            // 修正目标为 Button
+            if (el.tagName === 'SPAN' && el.parentElement && el.parentElement.tagName === 'BUTTON') {
+                el = el.parentElement;
+            }
+
+            // === 隐形打击逻辑 ===
+            log(`发现目标: "${text}"，启动压制`, "#e74c3c");
+
+            // 1. 瞬间隐藏所有干扰元素 (不管用户是否开启隐藏模式，点击瞬间必须隐藏)
+            applyVisibility(true); 
+
+            // 2. 执行点击
+            try {
+                el.click();
+                lastClickTime = Date.now();
+                
+                // 3. 启动“持续压制器”
+                // 原因：网页代码会在播放恢复后的几百毫秒内，尝试把云台弹出来。
+                // 我们要在这段时间内，不断地把它按回去。
+                let suppressionCount = 0;
+                const suppressor = setInterval(() => {
+                    applyVisibility(true); // 强制隐藏
+                    suppressionCount++;
+                    if (suppressionCount > 40) { // 压制 2秒 (40 * 50ms)
+                        clearInterval(suppressor);
+                        // 压制结束，恢复用户设定的状态
+                        // 如果用户本来就是隐藏模式，就继续隐藏
+                        // 如果用户是显示模式，这时候再显示出来
+                        applyVisibility(isUserHiddenMode);
+                        log("压制结束，恢复状态", "#7f8c8d");
+                    }
+                }, 50);
+
+                log("✅ 点击成功 (压制中...)", "#2ecc71");
+                
+                if(statusSpan) {
+                    statusSpan.innerText = "冷却中...";
+                    statusSpan.className = "status-cooldown";
+                }
+                break; 
+
+            } catch (e) {
+                log("❌ 点击报错: " + e.message, "red");
+            }
         }
     }
 
@@ -211,79 +285,10 @@
         if (logBox.children.length > 50) logBox.lastChild.remove();
     }
 
-    // === 核心逻辑：精准点击 & 阻止冒泡 ===
-    function checkAndClick() {
-        if (!document.getElementById(PANEL_ID)) createPanel();
-        if (Date.now() - lastClickTime < CLICK_COOLDOWN) return;
-
-        // 状态复位
-        const statusSpan = document.getElementById(`${PANEL_ID}-status`);
-        if (statusSpan && statusSpan.innerText !== "扫描中...") {
-            statusSpan.innerText = "扫描中...";
-            statusSpan.className = "status-running";
-        }
-
-        // 源码特征：el-button 包含 span 文本
-        // 我们查找所有可能的文本载体
-        const elements = document.querySelectorAll('span, button');
-        
-        for (let i = 0; i < elements.length; i++) {
-            let el = elements[i];
-            
-            // 1. 可见性检查
-            if (el.offsetParent === null) continue;
-            
-            // 2. 文本匹配
-            const text = el.innerText ? el.innerText.trim() : "";
-            if (!BUTTON_KEYWORDS.includes(text)) continue;
-
-            // === 3. 智能提升目标 (V9核心) ===
-            // 如果找到的是 <span>继续播放</span>，而它爸爸是 <button>，那就点爸爸
-            // 这样更符合 ElementUI 的事件绑定机制
-            if (el.tagName === 'SPAN' && el.parentElement && el.parentElement.tagName === 'BUTTON') {
-                el = el.parentElement;
-                console.log("360监控助手：已修正点击目标为父级 Button");
-            }
-
-            // === 4. 执行点击 & 强力阻止冒泡 ===
-            log(`发现目标: "${text}"`, "#e74c3c");
-            
-            try {
-                // 方式 A: 覆盖 onclick 阻止冒泡
-                el.onclick = function(e) {
-                    if (e) {
-                        e.stopPropagation();
-                        e.stopImmediatePropagation();
-                        e.preventDefault(); // 防止可能的默认跳转
-                    }
-                    console.log("360监控助手：已拦截冒泡");
-                };
-
-                // 方式 B: 原生点击
-                el.click();
-                
-                lastClickTime = Date.now();
-                log("✅ 点击成功 (已阻断云台触发)", "#2ecc71");
-                
-                if(statusSpan) {
-                    statusSpan.innerText = "冷却中...";
-                    statusSpan.className = "status-cooldown";
-                }
-                
-                // 任务完成，退出循环
-                break; 
-
-            } catch (e) {
-                log("❌ 点击报错: " + e.message, "red");
-            }
-        }
-    }
-
     // === 启动 ===
     setTimeout(() => {
         createPanel();
-        log("脚本 V9 已加载 (源码适配版)");
-        // 2秒轮询一次，性能损耗极低
+        log("脚本 V10 已加载 (隐形打击版)");
         setInterval(checkAndClick, 2000);
     }, 1500);
 
