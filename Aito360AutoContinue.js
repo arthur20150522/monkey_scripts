@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         360视觉云 - 显式控制面板 (V23.0 交互完善版)
+// @name         360视觉云 - 显式控制面板 (V24.0 监控增强版)
 // @namespace    http://tampermonkey.net/
-// @version      23.0
-// @description  [修复]悬浮球拖拽与点击；[新增]鼠标滚轮缩放；[优化]仅限中键平移；[保留]全屏黑屏修复、旋转、自动续播。
+// @version      24.0
+// @description  [新增]悬浮球实时显示时间戳；[新增]视频卡死红色预警；[优化]滚轮缩放与中键平移；[修复]全屏黑屏布局。
 // @author       Assistant
 // @match        *://*.360.cn/*
 // @match        *://*.360.com/*
@@ -22,7 +22,11 @@
     let isWebFullscreen = false;
     let autoHideTimer = null;
     let isPanelHovered = false;
-    let hasMoved = false; // 区分面板拖拽与点击
+    let hasMoved = false; 
+
+    // 监控状态
+    let lastTimestamp = "";
+    let freezeCounter = 0;
 
     // 变换状态
     let transformState = {
@@ -37,23 +41,33 @@
     let lastMouseX = 0;
     let lastMouseY = 0;
 
+    // === CSS 样式注入 ===
     const css = `
         .${HIDE_CLASS} { display: none !important; }
 
-        /* 面板样式 */
         #${PANEL_ID} {
             position: fixed; top: 160px; left: calc(100% - 250px);
             width: 230px; background: #2c3e50; color: #ecf0f1;
             z-index: 2147483647 !important; border-radius: 6px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.8); font-family: "Microsoft YaHei", sans-serif;
-            font-size: 12px; transition: opacity 0.2s, border-radius 0.2s; 
+            font-size: 12px; transition: opacity 0.2s, border-radius 0.2s, border-color 0.3s; 
             border: 1px solid #34495e; overflow: visible;
         }
         
         /* 最小化状态（悬浮球） */
-        #${PANEL_ID}.minimized { width: 48px; height: 48px; border-radius: 50%; cursor: pointer; border: 3px solid #27ae60; background: #2c3e50; overflow: hidden; }
-        #${PANEL_ID}.minimized::after { content: "🛡️"; font-size: 24px; line-height: 42px; text-align: center; width: 100%; display: block; pointer-events: none; }
+        #${PANEL_ID}.minimized { width: 54px; height: 54px; border-radius: 50%; cursor: pointer; border: 3px solid #27ae60; background: #2c3e50; overflow: hidden; }
+        #${PANEL_ID}.minimized.frozen { border-color: #e74c3c !important; box-shadow: 0 0 10px #e74c3c; }
         
+        /* 悬浮球内的图标和时间 */
+        #${PANEL_ID}.minimized::after { content: "🛡️"; font-size: 18px; line-height: 32px; text-align: center; width: 100%; display: block; pointer-events: none; }
+        #${PANEL_ID} .time-badge { display: none; }
+        #${PANEL_ID}.minimized .time-badge { 
+            display: block; position: absolute; bottom: 4px; width: 100%; 
+            text-align: center; font-size: 10px; font-weight: bold; color: #2ecc71; 
+            pointer-events: none; font-family: monospace;
+        }
+        #${PANEL_ID}.minimized.frozen .time-badge { color: #e74c3c; }
+
         #${PANEL_ID} .panel-header { padding: 10px; background: #34495e; cursor: move; display: flex; justify-content: space-between; align-items: center; height: 40px; box-sizing: border-box; }
         #${PANEL_ID}.minimized .header-text, 
         #${PANEL_ID}.minimized .toggle-btn, 
@@ -63,10 +77,9 @@
         .action-btn { background-color: #e67e22; color: white; border: none; padding: 8px; border-radius: 4px; cursor: pointer; font-weight: bold; display: flex; align-items: center; justify-content: center; gap: 5px; }
         .action-btn:hover { background-color: #d35400; }
         .fullscreen-btn { background-color: #3498db; }
-        .rotate-btn { background-color: #9b59b6; }
-        .log-box { height: 90px; background: #1a252f; border: 1px solid #34495e; overflow-y: auto; padding: 6px; color: #bdc3c7; font-size: 11px; }
+        .log-box { height: 80px; background: #1a252f; border: 1px solid #34495e; overflow-y: auto; padding: 6px; color: #bdc3c7; font-size: 11px; }
 
-        /* === 沉浸全屏修复 === */
+        /* === 网页全屏及选中格修复 === */
         body.tm-web-fullscreen { overflow: hidden !important; background: #000 !important; }
         body.tm-web-fullscreen .navbar, body.tm-web-fullscreen .sidebar-logo-container, body.tm-web-fullscreen .device-list-container, body.tm-web-fullscreen .monitor-top, body.tm-web-fullscreen .g-sdk { display: none !important; }
 
@@ -84,38 +97,38 @@
         }
 
         .tm-grabbing, .tm-grabbing * { cursor: grabbing !important; }
-        .monitor-grid-item.tm-video-selected { outline: 3px solid #3498db; }
+        .monitor-grid-item.tm-video-selected { outline: 3px solid #3498db !important; }
     `;
 
-    if (typeof GM_addStyle !== "undefined") { GM_addStyle(css); } else {
-        const style = document.createElement('style');
-        style.innerHTML = css;
-        document.head.appendChild(style);
-    }
+    const style = document.createElement('style');
+    style.innerHTML = css;
+    document.head.appendChild(style);
 
     function init() {
         createPanel();
         setupGlobalEvents();
         setInterval(checkAndClick, 2000);
-        log("脚本 V23.0 已就绪", "#2ecc71");
+        setInterval(updateTimestampInUI, 1000); // 每秒更新时间戳
+        log("脚本 V24.0 已就绪", "#2ecc71");
     }
 
-    // === 面板逻辑与拖拽修复 ===
+    // === 创建面板 ===
     function createPanel() {
         if (document.getElementById(PANEL_ID)) return;
         const panel = document.createElement('div');
         panel.id = PANEL_ID;
         panel.innerHTML = `
-            <div class="panel-header"><span class="header-text">360交互控制 V23</span><span class="toggle-btn" title="点击收起">➖</span></div>
+            <div class="time-badge" id="${PANEL_ID}-ball-time">00:00</div>
+            <div class="panel-header"><span class="header-text">360交互控制 V24</span><span class="toggle-btn" title="点击收起">➖</span></div>
             <div class="panel-content">
                 <button id="${PANEL_ID}-toggle-fullscreen" class="action-btn fullscreen-btn">📺 开启沉浸全屏</button>
-                <button id="${PANEL_ID}-rotate" class="action-btn rotate-btn">🔄 画面旋转</button>
+                <button id="${PANEL_ID}-rotate" class="action-btn">🔄 画面旋转</button>
                 <button id="${PANEL_ID}-toggle-all" class="action-btn">👁️ 隐藏干扰项</button>
                 <div style="font-size:10px; color:#95a5a6; border-top:1px solid #444; padding-top:4px; line-height:1.4">
-                    全屏操作(选中视频后):<br>
-                    - <b>缩放</b>: 滚轮 或 Ctrl + [ / ] <br>
-                    - <b>平移</b>: 按住<b>鼠标中键</b>拖拽<br>
-                    - <b>重置</b>: Alt + R
+                    提示：全屏选中视频后<br>
+                    - <b>滚轮</b> 缩放<br>
+                    - <b>中键</b> 拖拽画布<br>
+                    - <b>Alt + R</b> 恢复初始
                 </div>
                 <div class="log-box" id="${PANEL_ID}-log"></div>
             </div>
@@ -125,9 +138,8 @@
         const header = panel.querySelector('.panel-header');
         setupDraggable(panel, header);
 
-        // 面板点击：如果不是在拖拽，则根据当前状态展开或收起
         panel.addEventListener('click', (e) => {
-            if (hasMoved) return; // 如果发生了位移，不触发点击逻辑
+            if (hasMoved) return;
             if (panel.classList.contains('minimized')) {
                 ensureVisibleOnScreen(panel);
                 panel.classList.remove('minimized');
@@ -149,9 +161,41 @@
         resetAutoHideTimer();
     }
 
-    // === 核心逻辑：按键、中键平移与滚轮缩放 ===
+    // === 核心功能：提取时间戳并检测卡死 ===
+    function updateTimestampInUI() {
+        const panel = document.getElementById(PANEL_ID);
+        const ballTime = document.getElementById(`${PANEL_ID}-ball-time`);
+        if (!panel) return;
+
+        // 从选中的视频或者第一个视频中寻找 xgplayer 的当前时间标签
+        const targetContainer = transformState.el || document.querySelector('.monitor-grid-item');
+        const timeEl = targetContainer ? targetContainer.querySelector('.xgplayer-time-current') : null;
+        
+        if (timeEl) {
+            const currentTime = timeEl.innerText;
+            ballTime.innerText = currentTime;
+
+            // 检测时间戳是否停滞
+            if (currentTime === lastTimestamp && currentTime !== "00:00") {
+                freezeCounter++;
+            } else {
+                freezeCounter = 0;
+                panel.classList.remove('frozen');
+            }
+
+            // 停滞超过5秒显红
+            if (freezeCounter >= 5) {
+                panel.classList.add('frozen');
+            }
+            lastTimestamp = currentTime;
+        } else {
+            ballTime.innerText = "--:--";
+            panel.classList.remove('frozen');
+        }
+    }
+
+    // === 交互逻辑 ===
     function setupGlobalEvents() {
-        // 1. 键盘监听
         window.addEventListener('keydown', (e) => {
             if (e.altKey && e.key.toLowerCase() === 'r') { resetTransform(); log("重置成功", "#2ecc71"); }
             if (e.ctrlKey) {
@@ -160,24 +204,20 @@
             }
         });
 
-        // 2. 滚轮缩放
         window.addEventListener('wheel', (e) => {
             if (isWebFullscreen && transformState.el) {
-                e.preventDefault(); // 阻止页面滚动
+                e.preventDefault();
                 const delta = e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
                 changeZoom(delta);
             }
         }, { passive: false });
 
-        // 3. 鼠标交互（平移与选中）
         document.addEventListener('mousedown', (e) => {
             if (e.target.closest(`#${PANEL_ID}`)) return;
-
             const item = e.target.closest('.monitor-grid-item');
             if (!item) return;
 
-            // 选中视频格 (左键)
-            if (e.button === 0) {
+            if (e.button === 0) { // 左键选中
                 if (transformState.el) transformState.el.classList.remove('tm-video-selected');
                 transformState.el = item;
                 transformState.el.classList.add('tm-video-selected');
@@ -191,8 +231,7 @@
                 }
             }
 
-            // 平移逻辑 (仅限鼠标中键 - button 1)
-            if (e.button === 1) {
+            if (e.button === 1) { // 中键拖拽
                 if (isWebFullscreen && transformState.el) {
                     isPanning = true;
                     lastMouseX = e.clientX;
@@ -229,12 +268,10 @@
         if (!transformState.el) return;
         const video = transformState.el.querySelector('video');
         if (!video) return;
-
         video.setAttribute('data-scale', transformState.scale);
         video.setAttribute('data-tx', transformState.tx);
         video.setAttribute('data-ty', transformState.ty);
         video.setAttribute('data-rotate', transformState.rotate);
-
         video.style.transition = fast ? "none" : "transform 0.2s ease-out";
         video.style.transform = `translate(${transformState.tx}px, ${transformState.ty}px) scale(${transformState.scale}) rotate(${transformState.rotate}deg)`;
     }
@@ -265,12 +302,12 @@
             document.body.classList.add('tm-web-fullscreen');
             btn.innerText = "❌ 退出全屏模式";
             if (!isUserHiddenMode) toggleUserHiddenMode(true);
-            log("沉浸全屏模式开启", "#3498db");
+            log("沉浸全屏已开启", "#3498db");
         } else {
             document.body.classList.remove('tm-web-fullscreen');
             btn.innerText = "📺 开启沉浸全屏";
             resetTransform();
-            log("全屏已退出");
+            log("已退出全屏");
         }
         setTimeout(() => window.dispatchEvent(new Event('resize')), 500);
     }
@@ -288,30 +325,22 @@
             const btn = popup.querySelector('button');
             if (btn && BUTTON_KEYWORDS.includes(btn.innerText.trim())) {
                 btn.click();
-                log("自动续播中", "#e74c3c");
+                log("检测到中断，已自动恢复", "#e74c3c");
                 toggleUserHiddenMode(true);
                 setTimeout(() => toggleUserHiddenMode(isUserHiddenMode), 1000);
             }
         }
     }
 
-    // === 通用拖拽函数（支持最小化状态拖拽） ===
     function setupDraggable(element, handle) {
         let sx, sy, il, it;
-        
-        // 关键：将鼠标事件绑定到整个元素，但在展开状态下 handle 限制为 header
-        const dragTarget = element;
-
-        dragTarget.onmousedown = function(e) {
-            // 如果面板是展开的，且点击的不是 header，则不触发拖拽
+        element.onmousedown = function(e) {
             if (!element.classList.contains('minimized') && !e.target.closest('.panel-header')) return;
             if (e.target.classList.contains('toggle-btn')) return;
-
             sx = e.clientX; sy = e.clientY;
             const r = element.getBoundingClientRect();
             il = r.left; it = r.top;
             hasMoved = false;
-
             document.onmousemove = function(e) {
                 const dx = e.clientX - sx; const dy = e.clientY - sy;
                 if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
@@ -322,8 +351,7 @@
                 }
             };
             document.onmouseup = function() {
-                document.onmousemove = null; 
-                document.onmouseup = null;
+                document.onmousemove = null; document.onmouseup = null;
                 if (!isPanelHovered) resetAutoHideTimer();
                 ensureVisibleOnScreen(element);
             };
